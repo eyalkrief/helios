@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Helios - Dashboard</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+<script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;800&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head><body>
+<aside class="sidebar">
+<div class="sidebar-logo"><span>HELIOS</span></div>
+<nav class="sidebar-nav">
+<button class="nav-item active" data-view="companies">Societes</button>
+<button class="nav-item" data-view="clusters">Clusters</button>
+<button class="nav-item" data-view="stats">Statistiques</button>
+<button class="nav-item" data-view="api">API</button>
+</nav>
+<div class="sidebar-user">
+<img src="{{ user.picture }}" alt="" class="user-avatar">
+<div class="user-info"><div class="user-name">{{ user.name }}</div><div class="user-email">{{ user.email }}</div></div>
+<form action="{{ url_for('auth_logout') }}" method="POST" style="display:inline">
+<button type="submit" class="logout-btn">Sortir</button></form>
+</div></aside>
+<main class="main">
+<header class="topbar"><div class="search-wrap"><input type="text" id="search" placeholder="Rechercher..." autocomplete="off"></div></header>
+<section class="view active" id="view-companies">
+<div class="filters"><select id="sector-filter"><option value="">Tous les secteurs</option></select>
+<span class="result-count" id="result-count"></span></div>
+<div id="companies-list" class="companies-list"></div><div id="pagination" class="pagination"></div></section>
+<section class="view" id="view-clusters"><div id="clusters-list" class="clusters-list"></div></section>
+<section class="view" id="view-stats"><div id="stats-content"></div></section>
+<section class="view" id="view-api"><div id="api-content"></div></section>
+</main>
+<div id="modal" class="modal hidden"><div class="modal-inner" id="modal-content"></div></div>
+</body></html>

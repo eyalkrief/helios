@@ -1,0 +1,10 @@
+venv/
+env/
+.env
+*.db
+helios_data/
+__pycache__/
+*.pyc
+*.log
+.vscode/
+.idea/
