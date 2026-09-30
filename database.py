@@ -1,98 +1,118 @@
-
-import sqlite3, secrets
+"""Base de données — SQLite en local, PostgreSQL en prod."""
+import os, secrets, sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("NEON_DATABASE_URL")
+USE_PG = bool(DATABASE_URL and DATABASE_URL.startswith("postgres"))
 DB_PATH = Path(__file__).parent / "helios_data" / "helios.db"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    google_id TEXT UNIQUE NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    name TEXT, picture TEXT,
-    plan TEXT DEFAULT 'free',
-    api_key TEXT UNIQUE,
-    created_at TEXT NOT NULL,
-    last_login_at TEXT
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    session_token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS usage_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    endpoint TEXT NOT NULL,
-    timestamp TEXT NOT NULL
-);
-"""
+if USE_PG:
+    import psycopg2
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
+    if USE_PG:
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = False
         yield conn
         conn.commit()
-    finally:
         conn.close()
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+def _q(sql):
+    return sql.replace("?", "%s") if USE_PG else sql
+
+def _exec(conn, sql, params=()):
+    cur = conn.cursor()
+    cur.execute(_q(sql), params)
+    return cur
+
+def _row(cur, row):
+    if row is None: return None
+    if USE_PG:
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    return dict(row)
 
 def init_saas_schema():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not USE_PG: DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ddl = """
+    CREATE TABLE IF NOT EXISTS users (
+        user_id %s, google_id TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL,
+        name TEXT, picture TEXT, plan TEXT DEFAULT 'free', api_key TEXT UNIQUE,
+        created_at TEXT NOT NULL, last_login_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+        session_token TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS usage_log (
+        id %s, user_id INTEGER NOT NULL, endpoint TEXT NOT NULL, timestamp TEXT NOT NULL
+    );
+    """ % (("SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"),) * 2
     with get_db() as conn:
-        conn.executescript(SCHEMA)
+        _exec(conn, ddl)
 
 def upsert_user(google_id, email, name, picture):
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        ex = conn.execute("SELECT * FROM users WHERE google_id=?", (google_id,)).fetchone()
+        cur = _exec(conn, "SELECT * FROM users WHERE google_id=?", (google_id,))
+        ex = cur.fetchone()
         if ex:
-            conn.execute("UPDATE users SET email=?,name=?,picture=?,last_login_at=? WHERE user_id=?",
-                         (email,name,picture,now,ex["user_id"]))
-            uid = ex["user_id"]
+            uid = _row(cur, ex)["user_id"]
+            _exec(conn, "UPDATE users SET email=?,name=?,picture=?,last_login_at=? WHERE user_id=?",
+                  (email, name, picture, now, uid))
         else:
             key = "helios_" + secrets.token_urlsafe(32)
-            cur = conn.execute("INSERT INTO users (google_id,email,name,picture,api_key,created_at,last_login_at) VALUES (?,?,?,?,?,?,?)",
-                               (google_id,email,name,picture,key,now,now))
-            uid = cur.lastrowid
-        row = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
-        return dict(row)
+            _exec(conn, "INSERT INTO users (google_id,email,name,picture,api_key,created_at,last_login_at) VALUES (?,?,?,?,?,?,?)",
+                  (google_id, email, name, picture, key, now, now))
+            cur2 = _exec(conn, "SELECT * FROM users WHERE google_id=?", (google_id,))
+            uid = _row(cur2, cur2.fetchone())["user_id"]
+        cur3 = _exec(conn, "SELECT * FROM users WHERE user_id=?", (uid,))
+        return _row(cur3, cur3.fetchone())
 
 def get_user_by_session(token):
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        row = conn.execute("SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.user_id WHERE s.session_token=? AND s.expires_at>?",
-                           (token,now)).fetchone()
-        return dict(row) if row else None
+        cur = _exec(conn, "SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.user_id WHERE s.session_token=? AND s.expires_at>?",
+                    (token, now))
+        return _row(cur, cur.fetchone())
 
 def get_user_by_api_key(k):
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM users WHERE api_key=?", (k,)).fetchone()
-        return dict(row) if row else None
+        cur = _exec(conn, "SELECT * FROM users WHERE api_key=?", (k,))
+        return _row(cur, cur.fetchone())
 
 def create_session(uid, days=30):
-    tok = secrets.token_urlsafe(48)
+    t = secrets.token_urlsafe(48)
     now = datetime.now(timezone.utc)
     exp = now + timedelta(days=days)
     with get_db() as conn:
-        conn.execute("INSERT INTO sessions VALUES (?,?,?,?)", (tok,uid,now.isoformat(),exp.isoformat()))
-    return tok
+        _exec(conn, "INSERT INTO sessions (session_token,user_id,created_at,expires_at) VALUES (?,?,?,?)",
+              (t, uid, now.isoformat(), exp.isoformat()))
+    return t
 
 def delete_session(t):
     with get_db() as conn:
-        conn.execute("DELETE FROM sessions WHERE session_token=?", (t,))
+        _exec(conn, "DELETE FROM sessions WHERE session_token=?", (t,))
 
 def log_usage(uid, ep):
     with get_db() as conn:
-        conn.execute("INSERT INTO usage_log (user_id,endpoint,timestamp) VALUES (?,?,?)",
-                     (uid,ep,datetime.now(timezone.utc).isoformat()))
+        _exec(conn, "INSERT INTO usage_log (user_id,endpoint,timestamp) VALUES (?,?,?)",
+              (uid, ep, datetime.now(timezone.utc).isoformat()))
 
 def get_usage_today(uid):
     d = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_db() as conn:
-        r = conn.execute("SELECT COUNT(*) FROM usage_log WHERE user_id=? AND timestamp LIKE ?", (uid, d+"%")).fetchone()
-        return r[0] if r else 0
+        cur = _exec(conn, "SELECT COUNT(*) FROM usage_log WHERE user_id=? AND timestamp LIKE ?", (uid, d+"%"))
+        row = cur.fetchone()
+        return row[0] if row else 0

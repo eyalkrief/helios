@@ -74,6 +74,8 @@ def api_me():
         "plan": u["plan"], "api_key": u["api_key"],
         "usage_today": get_usage_today(u["user_id"])}})
 
+from database import _exec, _row  # ajoute en haut
+
 @app.route("/api/companies")
 @api_key_or_login
 def api_companies():
@@ -86,37 +88,27 @@ def api_companies():
         where.append("(name_en LIKE ? OR name_he LIKE ? OR company_number LIKE ?)")
         params += ["%"+search+"%"]*3
     if sector:
-        where.append("sector=?")
-        params.append(sector)
+        where.append("sector=?"); params.append(sector)
     ws = ("WHERE " + " AND ".join(where)) if where else ""
     try:
-        with get_db() as c:
-            total = c.execute("SELECT COUNT(*) FROM companies "+ws, params).fetchone()[0]
-            rows = c.execute("SELECT * FROM companies "+ws+" ORDER BY company_number DESC LIMIT ? OFFSET ?",
-                             params+[limit,offset]).fetchall()
+        with get_db() as conn:
+            cur = _exec(conn, "SELECT COUNT(*) FROM companies "+ws, params)
+            total = cur.fetchone()[0]
+            cur2 = _exec(conn, "SELECT * FROM companies "+ws+" ORDER BY company_number DESC LIMIT ? OFFSET ?",
+                         params+[limit,offset])
             companies = []
-            for r in rows:
-                x = dict(r)
-                x["risk_flags"] = json.loads(x.get("risk_flags") or "[]")
+            for r in cur2.fetchall():
+                x = _row(cur2, r)
+                import json as _j
+                x["risk_flags"] = _j.loads(x.get("risk_flags") or "[]")
                 x["cluster_ids"] = []
                 companies.append(x)
-    except Exception:
+    except Exception as e:
+        print("Erreur:", e)
         companies, total = [], 0
     if hasattr(g, "_user") and g._user:
         log_usage(g._user["user_id"], "companies_search")
     return jsonify({"success": True, "data": companies, "total": total})
-
-@app.route("/api/company/<cn>")
-@api_key_or_login
-def api_company(cn):
-    with get_db() as c:
-        r = c.execute("SELECT * FROM companies WHERE company_number=?", (cn,)).fetchone()
-        if not r: return jsonify({"success": False}), 404
-        x = dict(r)
-        x["risk_flags"] = json.loads(x.get("risk_flags") or "[]")
-        x["clusters"] = []
-        x["related_companies"] = []
-    return jsonify({"success": True, "data": x})
 
 @app.route("/api/clusters")
 @api_key_or_login
