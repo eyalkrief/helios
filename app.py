@@ -70,7 +70,7 @@ def api_key_or_login(f):
 
 
 # ═══════════════════════════════════════════════════════════════
-# ENRICHISSEMENT À LA DEMANDE
+# ENRICHISSEMENT À LA DEMANDE (DeepSeek)
 # ═══════════════════════════════════════════════════════════════
 
 def enrich_on_demand(company_number):
@@ -107,7 +107,7 @@ Traduis et enrichis ces données brutes en JSON strict.
 Données brutes :
 - Nom hébreu : {c.get('name_he', '')}
 - Numéro     : {c.get('company_number', '')}
-- Statut     : {c.get('status_he', '')}
+- Statut     : {c.get('status_he_raw', c.get('status_en', ''))}
 - Adresse    : {c.get('address_he', '')}
 
 Réponds en JSON avec ces clés exactes :
@@ -233,16 +233,52 @@ def api_me():
 def api_companies():
     search = request.args.get("search", "").strip()
     sector = request.args.get("sector", "").strip()
+    status = request.args.get("status", "").strip()
+    city = request.args.get("city", "").strip()
+    number_type = request.args.get("number_type", "").strip()
     limit = min(int(request.args.get("limit", 50)), 500)
     offset = int(request.args.get("offset", 0))
 
     where, params = [], []
+
+    # ⬇️ RECHERCHE MULTI-LANGUE avec traduction automatique
     if search:
-        where.append("(name_en LIKE ? OR name_he LIKE ? OR company_number LIKE ?)")
-        params += ["%" + search + "%"] * 3
+        try:
+            from search_translator import get_search_variants
+            variants = get_search_variants(search)
+        except Exception as e:
+            print(f"⚠️ Traduction indisponible : {e}")
+            variants = [search]
+
+        # Une sous-clause par variante
+        sub_clauses = []
+        for v in variants:
+            sub_clauses.append(
+                "(name_en LIKE ? OR name_he LIKE ? OR company_number LIKE ? "
+                "OR address_he LIKE ? OR address_en LIKE ? "
+                "OR sector LIKE ? OR context LIKE ?)"
+            )
+            params += ["%" + v + "%"] * 7
+
+        where.append("(" + " OR ".join(sub_clauses) + ")")
+        print(f"🔍 Recherche '{search}' → variantes : {variants}")
+
     if sector:
         where.append("sector = ?")
         params.append(sector)
+    if status:
+        where.append("status_en = ?")
+        params.append(status)
+    if city:
+        where.append("city_he = ?")
+        params.append(city)
+    if number_type == "vintage":
+        where.append("LENGTH(company_number) = 9 AND company_number LIKE '51%'")
+    elif number_type == "modern":
+        where.append("LENGTH(company_number) >= 10 AND company_number LIKE '51%'")
+    elif number_type == "foreign":
+        where.append("company_number LIKE '56%'")
+
     ws = ("WHERE " + " AND ".join(where)) if where else ""
 
     try:
@@ -271,6 +307,55 @@ def api_companies():
     return jsonify({"success": True, "data": companies, "total": total})
 
 
+@app.route("/api/translate")
+@api_key_or_login
+def api_translate():
+    """Endpoint debug : retourne les variantes pour un terme."""
+    term = request.args.get("term", "").strip()
+    if not term:
+        return jsonify({"success": False, "error": "term requis"})
+    try:
+        from search_translator import get_search_variants
+        variants = get_search_variants(term)
+        return jsonify({"success": True, "data": {"term": term, "variants": variants}})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/filters")
+@api_key_or_login
+def api_filters():
+    """Retourne les valeurs disponibles pour les filtres."""
+    try:
+        with get_db() as conn:
+            cur = _exec(conn,
+                "SELECT city_he as value, COUNT(*) as count FROM companies "
+                "WHERE city_he IS NOT NULL AND city_he != '' "
+                "GROUP BY city_he ORDER BY count DESC LIMIT 20")
+            cities = [_row(cur, r) for r in cur.fetchall()]
+
+            cur2 = _exec(conn,
+                "SELECT status_en as value, COUNT(*) as count FROM companies "
+                "WHERE status_en IS NOT NULL AND status_en != '' "
+                "GROUP BY status_en ORDER BY count DESC LIMIT 10")
+            statuses = [_row(cur2, r) for r in cur2.fetchall()]
+
+            cur3 = _exec(conn,
+                "SELECT sector as value, COUNT(*) as count FROM companies "
+                "WHERE sector IS NOT NULL AND sector != '' "
+                "GROUP BY sector ORDER BY count DESC LIMIT 30")
+            sectors = [_row(cur3, r) for r in cur3.fetchall()]
+
+        return jsonify({"success": True, "data": {
+            "cities": cities,
+            "statuses": statuses,
+            "sectors": sectors,
+        }})
+    except Exception as e:
+        print(f"Erreur /api/filters : {e}")
+        return jsonify({"success": True, "data": {"cities": [], "statuses": [], "sectors": []}})
+
+
 @app.route("/api/company/<cn>")
 @api_key_or_login
 def api_company(cn):
@@ -281,6 +366,50 @@ def api_company(cn):
     c["clusters"] = []
     c["related_companies"] = []
     return jsonify({"success": True, "data": c})
+
+
+@app.route("/api/company/<cn>/find_contacts", methods=["POST"])
+@api_key_or_login
+def api_find_contacts(cn):
+    """Cherche les coordonnées via Google Places API (officielle)."""
+    try:
+        from scraper_contacts import find_contacts
+    except ImportError:
+        return jsonify({
+            "success": False,
+            "error": "scraper_contacts non installé",
+            "data": {"phone": "", "website": "", "email": "", "found": False},
+        })
+
+    with get_db() as conn:
+        cur = _exec(conn, "SELECT * FROM companies WHERE company_number=?", (cn,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        c = _row(cur, row)
+
+    name = c.get("name_en") or c.get("name_he", "")
+    city = c.get("city_he", "")
+    if not city and c.get("address_en"):
+        parts = c["address_en"].split(",")
+        if len(parts) > 1:
+            city = parts[-1].strip()
+
+    contacts = find_contacts(name, city)
+
+    with get_db() as conn:
+        _exec(conn, """
+            UPDATE companies SET
+                phone = ?, website = ?, email = ?
+            WHERE company_number = ?
+        """, (
+            contacts.get("phone", ""),
+            contacts.get("website", ""),
+            contacts.get("email", ""),
+            cn,
+        ))
+
+    return jsonify({"success": True, "data": contacts})
 
 
 @app.route("/api/clusters")
