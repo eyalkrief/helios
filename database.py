@@ -1,4 +1,4 @@
-"""Base de données — SQLite en local, PostgreSQL en prod."""
+﻿"""Base de donnÃ©es â€” SQLite en local, PostgreSQL en prod."""
 import os, secrets, sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
@@ -9,7 +9,7 @@ USE_PG = bool(DATABASE_URL and DATABASE_URL.startswith("postgres"))
 DB_PATH = Path(__file__).parent / "helios_data" / "helios.db"
 
 if USE_PG:
-    import psycopg2
+    import psycopg
 
 @contextmanager
 def get_db():
