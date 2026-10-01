@@ -1,4 +1,4 @@
-﻿"""Base de donnÃ©es â€” SQLite en local, PostgreSQL en prod."""
+"""Base de données — SQLite en local, PostgreSQL en prod."""
 import os, secrets, sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
@@ -14,7 +14,7 @@ if USE_PG:
 @contextmanager
 def get_db():
     if USE_PG:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg.connect(DATABASE_URL)
         conn.autocommit = False
         yield conn
         conn.commit()
@@ -45,9 +45,10 @@ def _row(cur, row):
 
 def init_saas_schema():
     if not USE_PG: DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ddl = """
+    id_type = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    ddl = f"""
     CREATE TABLE IF NOT EXISTS users (
-        user_id %s, google_id TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL,
+        user_id {id_type}, google_id TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL,
         name TEXT, picture TEXT, plan TEXT DEFAULT 'free', api_key TEXT UNIQUE,
         created_at TEXT NOT NULL, last_login_at TEXT
     );
@@ -56,9 +57,9 @@ def init_saas_schema():
         created_at TEXT NOT NULL, expires_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS usage_log (
-        id %s, user_id INTEGER NOT NULL, endpoint TEXT NOT NULL, timestamp TEXT NOT NULL
+        id {id_type}, user_id INTEGER NOT NULL, endpoint TEXT NOT NULL, timestamp TEXT NOT NULL
     );
-    """ % (("SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"),) * 2
+    """
     with get_db() as conn:
         _exec(conn, ddl)
 
